@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Admin · Stock</title>
+    <style>
+      :root {
+        --bg: #121218;
+        --card: #1a1a20;
+        --border: #2a2a32;
+        --text: #e8e8ec;
+        --muted: #888898;
+        --accent: #22d3ee;
+        --danger: #f87171;
+        --ok: #34d399;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        font-family:
+          ui-sans-serif,
+          system-ui,
+          sans-serif;
+        background: var(--bg);
+        color: var(--text);
+        margin: 0;
+        padding: 1.5rem;
+        line-height: 1.45;
+      }
+      h1 {
+        font-size: 1.25rem;
+        font-weight: 600;
+        margin: 0 0 0.25rem;
+      }
+      .sub {
+        color: var(--muted);
+        font-size: 0.875rem;
+        margin-bottom: 1.25rem;
+      }
+      .card {
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 1rem;
+        overflow: hidden;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 0.875rem;
+      }
+      th,
+      td {
+        padding: 0.65rem 0.85rem;
+        text-align: left;
+        border-bottom: 1px solid var(--border);
+      }
+      th {
+        font-size: 0.65rem;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        color: var(--muted);
+        font-weight: 600;
+      }
+      tr:last-child td {
+        border-bottom: none;
+      }
+      .stock {
+        font-variant-numeric: tabular-nums;
+        font-family: ui-monospace, monospace;
+      }
+      .stock.out {
+        color: var(--danger);
+      }
+      .actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.35rem;
+      }
+      button {
+        cursor: pointer;
+        border: 1px solid var(--border);
+        background: #252530;
+        color: var(--text);
+        padding: 0.35rem 0.65rem;
+        border-radius: 0.5rem;
+        font-size: 0.75rem;
+      }
+      button:hover {
+        border-color: #444;
+        background: #2e2e38;
+      }
+      button.primary {
+        border-color: rgba(34, 211, 238, 0.35);
+        color: var(--accent);
+      }
+      button.danger {
+        border-color: rgba(248, 113, 113, 0.35);
+        color: var(--danger);
+      }
+      button:disabled {
+        opacity: 0.45;
+        cursor: not-allowed;
+      }
+      #status {
+        margin-top: 1rem;
+        font-size: 0.8rem;
+        color: var(--muted);
+      }
+      #status.err {
+        color: var(--danger);
+      }
+      #status.ok {
+        color: var(--ok);
+      }
+      .id {
+        font-family: ui-monospace, monospace;
+        font-size: 0.72rem;
+        color: var(--muted);
+      }
+      a.back {
+        color: var(--accent);
+        font-size: 0.8rem;
+        text-decoration: none;
+      }
+      a.back:hover {
+        text-decoration: underline;
+      }
+    </style>
+  </head>
+  <body>
+    <a class="back" href="/">← Volver al demo</a>
+    <h1>Gestión de stock</h1>
+    <p class="sub">Ajustar inventario del restaurante (SQLite).</p>
+    <div class="card">
+      <table>
+        <thead>
+          <tr>
+            <th>Producto</th>
+            <th>ID</th>
+            <th>Categoría</th>
+            <th>Stock</th>
+            <th>Acciones</th>
+          </tr>
+        </thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+    <p id="status"></p>
+    <script>
+      const rowsEl = document.getElementById("rows");
+      const statusEl = document.getElementById("status");
+
+      function setStatus(msg, kind) {
+        statusEl.textContent = msg || "";
+        statusEl.className = kind || "";
+      }
+
+      async function loadProducts() {
+        setStatus("Cargando…");
+        try {
+          const r = await fetch("/api/admin/products");
+          if (!r.ok) throw new Error(await r.text());
+          const data = await r.json();
+          rowsEl.innerHTML = "";
+          for (const p of data) {
+            const tr = document.createElement("tr");
+            const stockClass = p.stock <= 0 ? "stock out" : "stock";
+            const sid = escapeAttr(p.id);
+            tr.innerHTML = `
+              <td>${escapeHtml(p.name)}</td>
+              <td class="id">${escapeHtml(p.id)}</td>
+              <td>${escapeHtml(p.category)}</td>
+              <td class="${stockClass}" data-stock="${sid}">${p.stock}</td>
+              <td>
+                <div class="actions">
+                  <button type="button" class="primary" data-act="increment" data-id="${sid}">+1</button>
+                  <button type="button" data-act="decrement" data-id="${sid}">−1</button>
+                  <button type="button" class="danger" data-act="zero" data-id="${sid}">Cero</button>
+                </div>
+              </td>
+            `;
+            rowsEl.appendChild(tr);
+          }
+          setStatus(`${data.length} productos`, "ok");
+        } catch (e) {
+          setStatus(String(e.message || e), "err");
+        }
+      }
+
+      function escapeHtml(s) {
+        const d = document.createElement("div");
+        d.textContent = s;
+        return d.innerHTML;
+      }
+      function escapeAttr(s) {
+        return String(s).replace(/"/g, "&quot;");
+      }
+
+      rowsEl.addEventListener("click", async (ev) => {
+        const btn = ev.target.closest("button[data-act]");
+        if (!btn) return;
+        const id = btn.getAttribute("data-id");
+        const action = btn.getAttribute("data-act");
+        const body =
+          action === "zero"
+            ? { action: "zero", amount: 1 }
+            : { action, amount: 1 };
+        btn.disabled = true;
+        setStatus("Guardando…");
+        try {
+          const r = await fetch(`/api/admin/products/${encodeURIComponent(id)}/stock`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+          });
+          let data = {};
+          try {
+            data = await r.json();
+          } catch (_) {}
+          if (!r.ok) {
+            const d = data.detail;
+            const msg =
+              typeof d === "string"
+                ? d
+                : Array.isArray(d)
+                  ? d.map((x) => x.msg || JSON.stringify(x)).join("; ")
+                  : JSON.stringify(data);
+            throw new Error(msg || r.statusText);
+          }
+          const cell = rowsEl.querySelector(`td[data-stock="${id}"]`);
+          if (cell) {
+            cell.textContent = data.stock;
+            cell.className = data.stock <= 0 ? "stock out" : "stock";
+          }
+          setStatus(`Actualizado: ${data.name} → stock ${data.stock}`, "ok");
+        } catch (e) {
+          setStatus(String(e.message || e), "err");
+          await loadProducts();
+        } finally {
+          btn.disabled = false;
+        }
+      });
+
+      loadProducts();
+    </script>
+  </body>
+</html>
