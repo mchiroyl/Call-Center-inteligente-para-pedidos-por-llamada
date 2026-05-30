@@ -12,17 +12,20 @@ import asyncio
 import base64
 import contextlib
 import json
+import logging
 import os
 import time
 from typing import AsyncIterator, Literal, Optional
 
 import websockets
 from websockets.client import WebSocketClientProtocol
+from websockets.exceptions import InvalidStatus
 
 from events import TTSChunkEvent
 
 # Ximena - Calm Navigator: Spanish Latina female, clear and professional.
 DEFAULT_VOICE_ID = "3597a26f-80ef-4bd5-8101-9699bc764917"
+logger = logging.getLogger(__name__)
 
 
 def _ws_open_timeout_s() -> float:
@@ -184,10 +187,24 @@ class CartesiaTTS:
             f"wss://api.cartesia.ai/tts/websocket"
             f"?api_key={self.api_key}&cartesia_version={self.cartesia_version}"
         )
-        self._ws = await websockets.connect(
-            url,
-            open_timeout=self._open_timeout,
-        )
+        try:
+            self._ws = await websockets.connect(
+                url,
+                open_timeout=self._open_timeout,
+            )
+        except InvalidStatus as exc:
+            status_code = getattr(getattr(exc, "response", None), "status_code", None)
+            if status_code == 402:
+                logger.error(
+                    "Cartesia WebSocket rejected with HTTP 402. Check credits/billing for the TTS account."
+                )
+                raise RuntimeError(
+                    "Cartesia TTS unavailable: HTTP 402 from provider (possible credits/billing issue)."
+                ) from exc
+            raise
+        except Exception:
+            logger.exception("Cartesia WebSocket connection failed")
+            raise
 
         self._connection_signal.set()
         return self._ws

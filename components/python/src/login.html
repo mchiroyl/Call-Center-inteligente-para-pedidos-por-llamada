@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Ingreso interno</title>
+    <style>
+      :root {
+        --bg: #f6f2e8;
+        --card: #ffffff;
+        --ink: #14202c;
+        --muted: #64748b;
+        --accent: #284d32;
+        --accent-soft: #e7efe9;
+        --border: #d7e0d5;
+        --danger: #b91c1c;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        padding: 24px;
+        font-family: ui-sans-serif, system-ui, sans-serif;
+        background: radial-gradient(circle at top left, #fff8e6, var(--bg) 55%);
+        color: var(--ink);
+      }
+      .shell {
+        width: min(980px, 100%);
+        display: grid;
+        grid-template-columns: 1.1fr 0.9fr;
+        gap: 24px;
+      }
+      .hero, .card {
+        background: var(--card);
+        border-radius: 32px;
+        border: 1px solid var(--border);
+        box-shadow: 0 18px 60px rgba(20, 32, 44, 0.08);
+      }
+      .hero {
+        padding: 44px;
+        background: linear-gradient(140deg, #284d32, #2f5a3b 55%, #507458);
+        color: #fff9ef;
+      }
+      .eyebrow {
+        margin: 0 0 12px;
+        font-size: 14px;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: #f7d48b;
+      }
+      h1 {
+        margin: 0 0 16px;
+        font-size: 48px;
+        line-height: 1.04;
+      }
+      .hero p {
+        margin: 0 0 22px;
+        font-size: 20px;
+        color: #e2ede4;
+      }
+      .roles {
+        display: grid;
+        gap: 10px;
+      }
+      .role {
+        padding: 14px 16px;
+        background: rgba(255,255,255,0.08);
+        border-radius: 18px;
+      }
+      .role strong {
+        display: block;
+        margin-bottom: 6px;
+      }
+      .card {
+        padding: 32px;
+      }
+      label {
+        display: block;
+        margin-bottom: 8px;
+        font-weight: 600;
+      }
+      input {
+        width: 100%;
+        padding: 14px 16px;
+        border-radius: 14px;
+        border: 1px solid var(--border);
+        font: inherit;
+        margin-bottom: 18px;
+      }
+      button {
+        width: 100%;
+        border: 0;
+        border-radius: 16px;
+        padding: 14px 16px;
+        font: inherit;
+        font-weight: 700;
+        cursor: pointer;
+        background: var(--accent);
+        color: white;
+      }
+      button:hover { filter: brightness(1.04); }
+      .hint, .error {
+        margin-top: 14px;
+        font-size: 14px;
+      }
+      .hint { color: var(--muted); }
+      .error { color: var(--danger); min-height: 1.2em; }
+      .soft-box {
+        margin-top: 18px;
+        padding: 14px 16px;
+        background: var(--accent-soft);
+        border-radius: 16px;
+        color: #1f3a28;
+        font-size: 14px;
+      }
+      @media (max-width: 900px) {
+        .shell { grid-template-columns: 1fr; }
+        h1 { font-size: 36px; }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="shell">
+      <section class="hero">
+        <p class="eyebrow">Acceso interno</p>
+        <h1>Call Center Inteligente para Pedidos</h1>
+        <p>
+          Ingrese con un rol interno para operar cocina, caja, operaciones o administracion.
+        </p>
+        <div class="roles">
+          <div class="role">
+            <strong>Admin</strong>
+            Catalogo, stock, usuarios y mantenimiento.
+          </div>
+          <div class="role">
+            <strong>Cocina</strong>
+            Cambia pedidos de nuevo a en preparacion y de en preparacion a listo.
+          </div>
+          <div class="role">
+            <strong>Caja</strong>
+            Valida cobros y marca pagos pendientes como pagados.
+          </div>
+          <div class="role">
+            <strong>Operaciones</strong>
+            Supervisa el flujo completo, salida y entrega.
+          </div>
+        </div>
+      </section>
+
+      <section class="card">
+        <form id="loginForm">
+          <label for="username">Usuario</label>
+          <input id="username" name="username" autocomplete="username" required />
+
+          <label for="password">Contrasena</label>
+          <input id="password" name="password" type="password" autocomplete="current-password" required />
+
+          <button type="submit">Ingresar</button>
+          <p id="error" class="error"></p>
+        </form>
+        <p class="hint">Despues del login el sistema redirige automaticamente al modulo operativo.</p>
+        <div class="soft-box">
+          Credenciales demo por defecto:
+          <br />admin / admin123
+          <br />cocina / cocina123
+          <br />caja / caja123
+          <br />operaciones / operaciones123
+        </div>
+      </section>
+    </main>
+
+    <script>
+      const form = document.getElementById("loginForm");
+      const errorEl = document.getElementById("error");
+      const next = new URLSearchParams(window.location.search).get("next") || "/operations";
+
+      form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        errorEl.textContent = "";
+        const formData = new FormData(form);
+        const payload = {
+          username: String(formData.get("username") || "").trim(),
+          password: String(formData.get("password") || ""),
+        };
+
+        try {
+          const response = await fetch("/api/auth/login", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          });
+          if (!response.ok) {
+            const data = await response.json().catch(() => ({}));
+            throw new Error(data.detail || "No se pudo iniciar sesion.");
+          }
+          window.location.href = next;
+        } catch (error) {
+          errorEl.textContent = error instanceof Error ? error.message : "Error de autenticacion.";
+        }
+      });
+    </script>
+  </body>
+</html>

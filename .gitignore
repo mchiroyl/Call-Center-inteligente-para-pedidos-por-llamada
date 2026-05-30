@@ -1,33 +1,18 @@
-# Editor-specific
-.idea/
-*.iml
-*.sublime-project
-*.sublime-workspace
-.settings
-
-# (ts) Installed libs
-node_modules
-dist
-dist-ssr
+# Secrets and local environment
+.env
+.env.*
+!.env.example
 *.local
 
-# (py) Installed libs
-__pycache__
-venv
-
-# Misc
-.pnpm-store
-npm-debug.log
-.DS_STORE
-*.tgz
-.eslintcache
-package-lock.json
-.tmp
-.env
-/NOTES.md
+# Runtime databases and generated state
+data/*.db
+data/*.db-*
+components/python/*.db
+*.sqlite
+*.sqlite3
 
 # Logs
-logs
+logs/
 *.log
 npm-debug.log*
 yarn-debug.log*
@@ -35,13 +20,47 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
-# Editor directories and files
+# Frontend dependencies and build output
+node_modules/
+dist/
+dist-ssr/
+.pnpm-store/
+package-lock.json
+
+# Python dependencies, caches, and build output
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.uv-cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Academic/private deliverables not required to run the system
+docs/
+deliverables/
+
+# Editor and OS files
 .vscode/*
 !.vscode/extensions.json
-.idea
+.idea/
+*.iml
+*.sublime-project
+*.sublime-workspace
+.settings/
 .DS_Store
+Thumbs.db
 *.suo
 *.ntvs*
 *.njsproj
 *.sln
 *.sw?
+
+# Local notes and temporary files
+/NOTES.md
+/Untitled
+.tmp/
+*.tgz
+.eslintcache
