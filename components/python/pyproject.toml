@@ -1,5 +1,5 @@
 [project]
-name = "call-center-pedidos-por-llamada"
+name = "python-voice-agent"
 version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [
@@ -9,9 +9,7 @@ dependencies = [
     "langchain-core>=1.1.0",
     "langchain-openai>=1.2.1",
     "langgraph>=1.0.4",
-    "langgraph-checkpoint-sqlite>=3.1.0",
     "python-dotenv",
-    "twilio>=9.10.9",
     "uvicorn>=0.38.0",
     "websockets",
 ]
@@ -24,7 +22,6 @@ anthropic = ["langchain-anthropic"]
 [dependency-groups]
 dev = [
     "dotenv>=0.9.9",
-    "pytest>=8.0.0",
     "ruff>=0.8.0",
 ]
 
@@ -34,7 +31,6 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "W"]
-ignore = ["E501"]
 
 [tool.ruff.format]
 quote-style = "double"

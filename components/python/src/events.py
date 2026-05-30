@@ -217,29 +217,7 @@ class ToolResultEvent:
         )
 
 
-@dataclass
-class CallControlEvent:
-    """
-    Event emitted when the pipeline should apply call-level controls.
-
-    For Twilio, this is used to request a graceful hangup after the current
-    response has been spoken to the caller.
-    """
-
-    type: Literal["call_control"]
-
-    action: Literal["hangup"]
-
-    reason: str
-
-    ts: int
-
-    @classmethod
-    def hangup(cls, reason: str) -> "CallControlEvent":
-        return cls(type="call_control", action="hangup", reason=reason, ts=_now_ms())
-
-
-AgentEvent = Union[AgentChunkEvent, AgentEndEvent, ToolCallEvent, ToolResultEvent, CallControlEvent]
+AgentEvent = Union[AgentChunkEvent, AgentEndEvent, ToolCallEvent, ToolResultEvent]
 """
 Union type of all agent-related events.
 
