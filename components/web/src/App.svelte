@@ -5,15 +5,38 @@
     id: string;
     name: string;
     category: string;
+    description: string;
     stock: number;
     price_cents: number;
+    keywords: string[];
   };
 
-  type CartLine = {
+  type DraftItem = {
     product_id: string;
     name: string;
     quantity: number;
-    line_total_cents: number;
+    unit_price_cents: number;
+  };
+
+  type DraftOrder = {
+    customer_name: string | null;
+    customer_phone: string | null;
+    delivery_type: "delivery" | "pickup" | null;
+    address: string | null;
+    payment_method: "efectivo" | "tarjeta" | "transferencia" | "paypal" | null;
+    notes: string | null;
+    items: DraftItem[];
+    missing_fields: string[];
+    ready_for_confirmation: boolean;
+    last_retrieval_hits: RetrievalHit[];
+  };
+
+  type RetrievalHit = {
+    id: string;
+    title: string;
+    source: string;
+    content: string;
+    score: number;
   };
 
   type OrderItem = {
@@ -25,11 +48,25 @@
 
   type Order = {
     id: string;
-    status: "nuevo" | "en_preparacion" | "listo";
+    customer_name: string | null;
+    customer_phone: string | null;
+    delivery_type: "delivery" | "pickup";
+    address: string | null;
+    notes: string | null;
+    payment_method: "efectivo" | "tarjeta" | "transferencia" | "paypal";
+    payment_status: "paid" | "pending_cash";
+    status: "nuevo" | "en_preparacion" | "listo" | "en_camino" | "entregado" | "cancelado";
     created_at: string;
-    items: OrderItem[];
     total_cents: number;
-    payment_method: "efectivo" | "tarjeta" | null;
+    items: OrderItem[];
+    summary: string;
+    tracking_code?: string;
+  };
+
+  type StaffUser = {
+    username: string;
+    display_name: string;
+    role: "admin" | "cocina" | "caja" | "operaciones";
   };
 
   type VoiceEvent = {
@@ -42,46 +79,52 @@
     message?: string;
   };
 
-  type ToolEnvelope = {
-    kind: "cart" | "menu" | "order" | "error" | "payment_complete";
-    message: string;
-    lines?: CartLine[];
-    menu?: MenuItem[];
-    order?: { order_id: string; status: string; summary: string };
-    total_cents?: number;
-    error?: string;
+  type ToolEnvelope =
+    | { kind: "draft"; message: string; draft: DraftOrder; total_cents: number }
+    | { kind: "retrieval"; message: string; query: string; hits: RetrievalHit[] }
+    | { kind: "order"; message: string; order: Order; total_cents: number }
+    | { kind: "error"; message: string; error: string };
+
+  const emptyDraft: DraftOrder = {
+    customer_name: null,
+    customer_phone: null,
+    delivery_type: null,
+    address: null,
+    payment_method: null,
+    notes: null,
+    items: [],
+    missing_fields: ["items", "customer_name", "customer_phone", "delivery_type", "payment_method"],
+    ready_for_confirmation: false,
+    last_retrieval_hits: [],
   };
 
   const statusLabels = {
     nuevo: "Nuevo",
-    en_preparacion: "En preparación",
+    en_preparacion: "En preparacion",
     listo: "Listo",
-  };
-
-  const statusIcons = {
-    nuevo: "🔴",
-    en_preparacion: "🟡",
-    listo: "🟢",
+    en_camino: "En camino",
+    entregado: "Entregado",
+    cancelado: "Cancelado",
   };
 
   let route = $state("/");
   let menu = $state<MenuItem[]>([]);
-  let cartLines = $state<CartLine[]>([]);
-  let cartTotal = $state(0);
+  let draft = $state<DraftOrder>(emptyDraft);
+  let draftTotal = $state(0);
+  let retrievalHits = $state<RetrievalHit[]>([]);
   let orders = $state<Order[]>([]);
-  let kitchenConnected = $state(false);
+  let operationsConnected = $state(false);
   let voiceConnected = $state(false);
   let listening = $state(false);
-  let voiceStarting = $state(false); // true while mic/WS is initializing (prevents double-click)
+  let voiceStarting = $state(false);
   let transcript = $state("");
-  let assistantText = $state("Presiona el micrófono y pide tu sandwich.");
+  let assistantText = $state("Presione hablar para simular una llamada de pedidos.");
+  let sttHistory = $state<{ text: string; type: "final"; time: string }[]>([]);
   let voiceStatus = $state("listo");
-  let lastOrder = $state("");
-  let lastPayment = $state("");
-  let newOrderAlert = $state<string | null>(null);
-  let alertTimer: ReturnType<typeof setTimeout> | undefined;
+  let lastConfirmedOrder = $state<Order | null>(null);
+  let currentUser = $state<StaffUser | null>(null);
 
-  let kitchenWs: WebSocket | undefined;
+  let operationsWs: WebSocket | undefined;
   let voiceWs: WebSocket | undefined;
   let mediaStream: MediaStream | undefined;
   let inputContext: AudioContext | undefined;
@@ -92,21 +135,13 @@
   let nextAudioTime = 0;
   let pendingPcmChunks: Int16Array[] = [];
   let pendingPcmSampleCount = 0;
+  let voiceServerReady = false;
   let orderCompleted = false;
-  let voiceServerReady = false;   // true once server sends {type:"ready"}
   let closeAfterOrderTimer: ReturnType<typeof setTimeout> | undefined;
 
   const targetInputSamples = 1600;
 
   const microphoneWorklet = `
-    /**
-     * MicrophoneProcessor — passthrough sin VAD.
-     *
-     * El browser ya aplica noiseSuppression y echoCancellation a nivel de
-     * MediaStream; no necesitamos filtrar manualmente aquí.  Enviar siempre
-     * el audio garantiza que AssemblyAI no cierre la conexión por inactividad
-     * y que voces bajas o micrófonos poco sensibles sean siempre escuchados.
-     */
     class MicrophoneProcessor extends AudioWorkletProcessor {
       constructor() {
         super();
@@ -114,7 +149,6 @@
         this.buffer = new Float32Array(this.bufferSize);
         this.offset = 0;
       }
-
       process(inputs) {
         const input = inputs[0] && inputs[0][0];
         if (input && input.length > 0) {
@@ -136,7 +170,7 @@
 
   const money = (cents: number) => `Q ${(cents / 100).toFixed(2)}`;
   const shortId = (id: string) => id.slice(0, 8).toUpperCase();
-  const orderTime = (raw: string) =>
+  const formatTime = (raw: string) =>
     new Intl.DateTimeFormat("es-GT", {
       hour: "2-digit",
       minute: "2-digit",
@@ -144,12 +178,10 @@
     }).format(new Date(raw));
 
   function syncRoute(): void {
-    route = window.location.pathname === "/kitchen" ? "/kitchen" : "/";
-  }
-
-  async function loadMenu(): Promise<void> {
-    const res = await fetch("/api/menu");
-    menu = await res.json();
+    route =
+      window.location.pathname === "/kitchen" || window.location.pathname === "/operations"
+        ? "/operations"
+        : "/";
   }
 
   function wsUrl(path: string): string {
@@ -157,69 +189,60 @@
     return `${protocol}://${window.location.host}${path}`;
   }
 
-  function upsertOrder(order: Order): void {
-    const without = orders.filter((item) => item.id !== order.id);
-    orders = [order, ...without].sort(
-      (a, b) =>
-        new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
-    );
+  function getOperationsKey(): string {
+    return window.sessionStorage.getItem("operations_api_key") || "";
   }
 
-  /** Plays a brief beep using the Web Audio API — no external file needed */
-  function playNewOrderBeep(): void {
-    try {
-      const ctx = new AudioContext();
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-      osc.connect(gain);
-      gain.connect(ctx.destination);
-      osc.type = "sine";
-      osc.frequency.setValueAtTime(880, ctx.currentTime);
-      osc.frequency.setValueAtTime(1100, ctx.currentTime + 0.12);
-      osc.frequency.setValueAtTime(880, ctx.currentTime + 0.24);
-      gain.gain.setValueAtTime(0.4, ctx.currentTime);
-      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.5);
-      osc.start(ctx.currentTime);
-      osc.stop(ctx.currentTime + 0.5);
-      osc.onended = () => ctx.close();
-    } catch {
-      // silent fail if AudioContext is blocked
+  function operationsHeaders(): HeadersInit {
+    const key = getOperationsKey();
+    return key ? { "X-Operations-Key": key } : {};
+  }
+
+  async function loadMenu(): Promise<void> {
+    const res = await fetch("/api/menu");
+    menu = await res.json();
+  }
+
+  async function loadOrders(): Promise<void> {
+    const res = await fetch("/api/kitchen/orders", {
+      headers: operationsHeaders(),
+    });
+    if (res.status === 401) {
+      window.location.href = "/login?next=/operations";
+      return;
     }
-  }
-
-  function triggerNewOrderAlert(order: Order): void {
-    playNewOrderBeep();
-    if (alertTimer) clearTimeout(alertTimer);
-    newOrderAlert = `¡Nuevo pedido #${shortId(order.id)}!`;
-    alertTimer = setTimeout(() => {
-      newOrderAlert = null;
-    }, 4000);
-  }
-
-  async function loadKitchenOrders(): Promise<void> {
-    const res = await fetch("/api/kitchen/orders");
+    if (!res.ok) throw new Error("No se pudo cargar el dashboard operativo.");
     orders = await res.json();
   }
 
-  function connectKitchen(): void {
-    kitchenWs?.close();
-    kitchenWs = new WebSocket(wsUrl("/kitchen/ws"));
-    kitchenWs.onopen = () => {
-      kitchenConnected = true;
+  function upsertOrder(order: Order): void {
+    const without = orders.filter((item) => item.id !== order.id);
+    orders = [order, ...without].sort(
+      (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
+    );
+  }
+
+  function connectOperations(): void {
+    operationsWs?.close();
+    const key = getOperationsKey();
+    const suffix = key ? `?ops_key=${encodeURIComponent(key)}` : "";
+    operationsWs = new WebSocket(wsUrl(`/kitchen/ws${suffix}`));
+    operationsWs.onopen = () => {
+      operationsConnected = true;
     };
-    kitchenWs.onclose = () => {
-      kitchenConnected = false;
+    operationsWs.onclose = (event) => {
+      operationsConnected = false;
+      if (event.code === 4401) {
+        window.location.href = "/login?next=/operations";
+      }
       setTimeout(() => {
-        if (route === "/kitchen") connectKitchen();
+        if (route === "/operations") connectOperations();
       }, 1500);
     };
-    kitchenWs.onmessage = (event) => {
+    operationsWs.onmessage = (event) => {
       const payload = JSON.parse(event.data);
       if (payload.type === "snapshot") orders = payload.orders;
-      if (payload.type === "order_created") {
-        upsertOrder(payload.order);
-        triggerNewOrderAlert(payload.order);
-      }
+      if (payload.type === "order_created") upsertOrder(payload.order);
       if (payload.type === "order_updated") upsertOrder(payload.order);
     };
   }
@@ -227,22 +250,82 @@
   async function setStatus(order: Order, status: Order["status"]): Promise<void> {
     const res = await fetch(`/api/kitchen/orders/${order.id}/status`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        ...operationsHeaders(),
+      },
       body: JSON.stringify({ status }),
     });
+    if (res.status === 401) {
+      window.location.href = "/login?next=/operations";
+      return;
+    }
     if (res.ok) upsertOrder(await res.json());
   }
 
-  function downsampleTo16k(input: Float32Array, sourceRate: number): Int16Array {
-    if (sourceRate === 16000) {
-      return floatToInt16(input);
+  async function setPaymentStatus(order: Order, payment_status: "pending_cash" | "paid"): Promise<void> {
+    const res = await fetch(`/api/kitchen/orders/${order.id}/payment-status`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...operationsHeaders(),
+      },
+      body: JSON.stringify({ payment_status }),
+    });
+    if (res.status === 401) {
+      window.location.href = "/login?next=/operations";
+      return;
     }
+    if (res.ok) upsertOrder(await res.json());
+  }
+
+  async function loadAuth(): Promise<void> {
+    const res = await fetch("/api/auth/me");
+    if (!res.ok) {
+      currentUser = null;
+      if (route === "/operations") window.location.href = "/login?next=/operations";
+      return;
+    }
+    currentUser = await res.json();
+  }
+
+  async function logout(): Promise<void> {
+    await fetch("/api/auth/logout", { method: "POST" });
+    window.location.href = "/login";
+  }
+
+  function trackingCode(order: Order): string {
+    return order.tracking_code || shortId(order.id);
+  }
+
+  const canSeeKitchen = $derived(
+    currentUser ? ["admin", "cocina", "operaciones"].includes(currentUser.role) : false,
+  );
+  const canSeeCashier = $derived(
+    currentUser ? ["admin", "caja", "operaciones"].includes(currentUser.role) : false,
+  );
+  const canManageOps = $derived(
+    currentUser ? ["admin", "operaciones"].includes(currentUser.role) : false,
+  );
+
+  function allowedStatusButtons(order: Order): Order["status"][] {
+    if (!currentUser) return [];
+    if (currentUser.role === "admin" || currentUser.role === "operaciones") {
+      return ["nuevo", "en_preparacion", "listo", "en_camino", "entregado", "cancelado"];
+    }
+    if (currentUser.role === "cocina") {
+      if (order.status === "nuevo") return ["en_preparacion"];
+      if (order.status === "en_preparacion") return ["listo"];
+    }
+    return [];
+  }
+
+  function downsampleTo16k(input: Float32Array, sourceRate: number): Int16Array {
+    if (sourceRate === 16000) return floatToInt16(input);
     const ratio = sourceRate / 16000;
     const length = Math.floor(input.length / ratio);
     const output = new Float32Array(length);
-    for (let i = 0; i < length; i += 1) {
-      output[i] = input[Math.floor(i * ratio)] ?? 0;
-    }
+    for (let i = 0; i < length; i += 1) output[i] = input[Math.floor(i * ratio)] ?? 0;
     return floatToInt16(output);
   }
 
@@ -274,37 +357,31 @@
   }
 
   function flushPendingInputAudio(force = false): void {
-    // Don't send audio until the server has finished the greeting and sent "ready"
     if (!voiceServerReady) return;
     if (!voiceWs || voiceWs.readyState !== WebSocket.OPEN) return;
     if (pendingPcmSampleCount < targetInputSamples && !force) return;
     if (pendingPcmSampleCount === 0) return;
 
-    // Concatenar todos los chunks en un solo array
     const all = new Int16Array(pendingPcmSampleCount);
-    let off = 0;
+    let offset = 0;
     for (const chunk of pendingPcmChunks) {
-      all.set(chunk, off);
-      off += chunk.length;
+      all.set(chunk, offset);
+      offset += chunk.length;
     }
     pendingPcmChunks = [];
     pendingPcmSampleCount = 0;
 
-    // AssemblyAI requiere chunks entre 50 ms (800 samples) y 1000 ms (16 000 samples).
-    // Enviamos en trozos de targetInputSamples (1600 samples = 100 ms) como máximo.
-    const maxChunk = targetInputSamples; // 100 ms @ 16 kHz
-    const minSamples = 800;             // 50 ms @ 16 kHz
-    
+    const maxChunk = targetInputSamples;
+    const minSamples = 800;
+
     let processed = 0;
     for (let i = 0; i < all.length; i += maxChunk) {
       const slice = all.slice(i, i + maxChunk);
       if (slice.length < minSamples) {
-        // Guardar el resto en un nuevo chunk si no estamos forzando
         if (!force) {
           pendingPcmChunks = [slice];
           pendingPcmSampleCount = slice.length;
         } else {
-          // Si forzamos (fin de grabación), lo enviamos aunque sea corto
           voiceWs.send(slice);
         }
         break;
@@ -312,7 +389,7 @@
       voiceWs.send(slice);
       processed += slice.length;
     }
-    
+
     if (processed === all.length) {
       pendingPcmChunks = [];
       pendingPcmSampleCount = 0;
@@ -347,13 +424,9 @@
     const remainingAudioMs = outputContext
       ? Math.max(0, nextAudioTime - outputContext.currentTime) * 1000
       : 0;
-    // Si no hay audio reproduciéndose todavía (el TTS aún no ha llegado),
-    // esperamos 8 s para dar tiempo al LLM + Cartesia a generar el audio
-    // de despedida. Cada tts_chunk que llegue reiniciará el timer con el
-    // tiempo exacto restante.
     const delay = remainingAudioMs > 0 ? remainingAudioMs + 900 : 8000;
     closeAfterOrderTimer = setTimeout(() => {
-      voiceStatus = "pedido finalizado";
+      voiceStatus = "llamada finalizada";
       voiceWs?.close();
       voiceConnected = false;
       void inputContext?.close().catch(() => undefined);
@@ -364,39 +437,37 @@
   function applyToolResult(result: string): void {
     try {
       const payload = JSON.parse(result) as ToolEnvelope;
-      if (payload.kind === "menu" && payload.menu) menu = payload.menu;
-      if (payload.kind === "cart") {
-        cartLines = payload.lines ?? [];
-        cartTotal = payload.total_cents ?? 0;
+      if (payload.kind === "draft") {
+        draft = payload.draft;
+        draftTotal = payload.total_cents;
+        retrievalHits = payload.draft.last_retrieval_hits ?? retrievalHits;
       }
-      if (payload.kind === "order" && payload.order) {
-        // El pedido fue confirmado — limpiar carrito pero mantener el micrófono abierto
-        // para continuar con la pregunta de pago.
-        cartLines = [];
-        cartTotal = 0;
-        lastOrder = `Pedido #${shortId(payload.order.order_id)} enviado a cocina.`;
-        voiceStatus = "pedido en cocina — esperando método de pago";
-        // No cerrar sesión aquí; el agente seguirá preguntando el método de pago.
+      if (payload.kind === "retrieval") {
+        retrievalHits = payload.hits;
       }
-      if (payload.kind === "payment_complete" && payload.order) {
-        // Pago procesado — detener el micrófono YA pero NO cerrar el
-        // WebSocket todavía: el agente aún va a generar y leer la despedida.
-        // El cierre se programa en agent_end / tts_chunk cuando ya se sabe
-        // cuánto audio queda por reproducir.
+      if (payload.kind === "order") {
+        lastConfirmedOrder = payload.order;
+        draft = emptyDraft;
+        draftTotal = 0;
+        upsertOrder(payload.order);
         orderCompleted = true;
-        const method = payload.order.summary ?? "efectivo";
-        const total = payload.total_cents ?? 0;
-        lastPayment = `Pago en ${method} de ${money(total)} confirmado.`;
-        voiceStatus = "pago confirmado — despidiendo...";
         stopMicrophoneInput();
-        // No llamar scheduleCloseAfterOrderAudio() aquí: el TTS todavía
-        // no ha llegado y el timer de 900 ms cierra el WS antes del audio.
       }
       if (payload.kind === "error") {
-        voiceStatus = payload.error ?? payload.message;
+        voiceStatus = payload.error;
       }
     } catch {
-      // Tool results that are not JSON are only shown in the event stream.
+      // ignore non-JSON tool messages
+    }
+  }
+
+  function addSttHistory(text: string): void {
+    sttHistory = [
+      ...sttHistory,
+      { text, type: "final", time: new Date().toLocaleTimeString() },
+    ];
+    if (sttHistory.length > 20) {
+      sttHistory = sttHistory.slice(-20);
     }
   }
 
@@ -408,7 +479,8 @@
     if (event.type === "stt_output" && event.transcript) {
       transcript = event.transcript;
       assistantText = "";
-      voiceStatus = "procesando pedido";
+      voiceStatus = "procesando";
+      addSttHistory(event.transcript);
     }
     if (event.type === "agent_chunk" && event.text) {
       assistantText += event.text;
@@ -417,19 +489,17 @@
       applyToolResult(event.result);
     }
     if (event.type === "agent_end") {
-      voiceStatus = orderCompleted
-        ? "pedido finalizado"
-        : "listo para seguir hablando";
+      voiceStatus = orderCompleted ? "pedido confirmado" : "listo para continuar";
       if (orderCompleted) scheduleCloseAfterOrderAudio();
     }
     if (event.type === "tts_chunk" && event.audio) {
       playPcmChunk(event.audio);
     }
     if (event.type === "ready") {
-      voiceStatus = "habla ahora";
+      voiceStatus = "hable ahora";
     }
     if (event.type === "error") {
-      voiceStatus = event.message ?? "error en el agente de voz";
+      voiceStatus = event.message ?? "error en la llamada simulada";
     }
   }
 
@@ -437,31 +507,27 @@
     return new Promise((resolve, reject) => {
       socket.onopen = () => {
         voiceConnected = true;
-        voiceStatus = "escucha activa — preparando agente";
+        voiceStatus = "inicializando llamada";
         resolve();
       };
       socket.onerror = () => {
-        voiceStatus = "no se pudo conectar con el agente de voz";
-        reject(new Error("No se pudo conectar con el agente de voz."));
+        voiceStatus = "no se pudo conectar con el backend de voz";
+        reject(new Error("No se pudo conectar con el backend de voz."));
       };
     });
   }
 
   async function startVoice(): Promise<void> {
-    if (listening || voiceStarting) return;  // evitar doble inicio
+    if (listening || voiceStarting) return;
     voiceStarting = true;
-
-    // ── Reset state ──────────────────────────────────────────────────
-    voiceStatus = "activando micrófono...";
-    lastOrder = "";
-    lastPayment = "";
+    voiceStatus = "activando microfono";
     transcript = "";
     assistantText = "";
+    lastConfirmedOrder = null;
     orderCompleted = false;
     voiceServerReady = false;
     if (closeAfterOrderTimer) clearTimeout(closeAfterOrderTimer);
 
-    // ── PASO 1: solicitar micrófono INMEDIATAMENTE ────────────────────
     try {
       mediaStream = await navigator.mediaDevices.getUserMedia({
         audio: {
@@ -473,12 +539,11 @@
         },
       });
     } catch (error) {
-      voiceStatus = error instanceof Error ? error.message : "no se pudo acceder al micrófono";
+      voiceStatus = error instanceof Error ? error.message : "no se pudo acceder al microfono";
       voiceStarting = false;
       return;
     }
 
-    // ── PASO 2: iniciar AudioWorklet (captura activa, buffer acumula) ─
     try {
       inputContext = new AudioContext();
       source = inputContext.createMediaStreamSource(mediaStream);
@@ -496,8 +561,7 @@
       };
       source.connect(workletNode);
       workletNode.connect(inputContext.destination);
-      // El audio se buferea. listening aun es false hasta que el WS conecte.
-      voiceStatus = "conectando con el agente...";
+      voiceStatus = "conectando llamada";
     } catch (error) {
       await stopVoice();
       voiceStarting = false;
@@ -505,7 +569,6 @@
       return;
     }
 
-    // ── PASO 3: conectar WebSocket EN PARALELO al audio ───────────────
     voiceWs = new WebSocket(wsUrl("/ws"));
     voiceWs.binaryType = "arraybuffer";
 
@@ -515,13 +578,10 @@
       listening = false;
       voiceStarting = false;
       voiceServerReady = false;
-      rejectReady?.(new Error("La conexión de voz se cerró antes de iniciar."));
+      rejectReady?.(new Error("La llamada se cerro antes de iniciar."));
       rejectReady = undefined;
-      if (orderCompleted) {
-        voiceStatus = "pedido finalizado";
-      } else if (voiceStatus !== "micrófono detenido") {
-        voiceStatus = "conexión cerrada";
-      }
+      if (orderCompleted) voiceStatus = "pedido confirmado";
+      else if (voiceStatus !== "microfono detenido") voiceStatus = "conexion cerrada";
     };
 
     let markReady: (() => void) | undefined;
@@ -536,11 +596,10 @@
         handleVoiceEvent(payload);
         if (payload.type === "ready") {
           voiceServerReady = true;
-          flushPendingInputAudio(true); // Enviar el audio acumulado en trozos válidos
-          
+          flushPendingInputAudio(true);
           listening = true;
           voiceStarting = false;
-          voiceStatus = "habla ahora";
+          voiceStatus = "hable ahora";
           markReady?.();
           markReady = undefined;
           rejectReady = undefined;
@@ -554,8 +613,7 @@
     } catch (error) {
       await stopVoice();
       voiceStarting = false;
-      voiceStatus =
-        error instanceof Error ? error.message : "no se pudo conectar con el agente";
+      voiceStatus = error instanceof Error ? error.message : "no se pudo iniciar la llamada";
     }
   }
 
@@ -568,260 +626,285 @@
     voiceStarting = false;
     voiceConnected = false;
     voiceServerReady = false;
-    voiceStatus = "micrófono detenido";
+    voiceStatus = "microfono detenido";
     if (closeAfterOrderTimer) clearTimeout(closeAfterOrderTimer);
   }
 
-  // Derived counts for kitchen header
   const countNuevo = $derived(orders.filter((o) => o.status === "nuevo").length);
   const countPrep = $derived(orders.filter((o) => o.status === "en_preparacion").length);
   const countListo = $derived(orders.filter((o) => o.status === "listo").length);
+  const countEnCamino = $derived(orders.filter((o) => o.status === "en_camino").length);
+  const cashierQueue = $derived(
+    orders.filter(
+      (o) => o.payment_status === "pending_cash" && !["entregado", "cancelado"].includes(o.status),
+    ),
+  );
 
   onMount(() => {
     syncRoute();
     window.addEventListener("popstate", syncRoute);
-    if (route === "/kitchen") {
-      loadKitchenOrders();
-      connectKitchen();
-    } else {
-      loadMenu();
+    loadMenu();
+    if (route === "/operations") {
+      loadAuth().then(() => loadOrders()).catch(() => {
+        operationsConnected = false;
+      });
+      connectOperations();
     }
 
     return () => {
       window.removeEventListener("popstate", syncRoute);
-      kitchenWs?.close();
+      operationsWs?.close();
       stopVoice();
     };
   });
 </script>
 
-{#if route === "/kitchen"}
-  <!-- ═══════════════════════════════════════════════════════
-       KITCHEN DISPLAY SYSTEM  /kitchen
-  ════════════════════════════════════════════════════════════ -->
-  <div class="kds-root">
-    <!-- ── Toast alert para pedido nuevo ── -->
-    {#if newOrderAlert}
-      <div class="kds-toast" role="alert" aria-live="assertive">
-        <span class="kds-toast-icon">🔔</span>
-        <span>{newOrderAlert}</span>
+{#if route === "/operations"}
+  <main class="ops-page">
+    <header class="hero hero--ops">
+      <div>
+        <p class="eyebrow">Call Center IA</p>
+        <h1>Dashboard Operativo</h1>
+        <p class="hero-copy">
+          Pedidos activos, flujo de cocina y cola de caja sincronizados en tiempo real.
+        </p>
       </div>
-    {/if}
-
-    <!-- ── Header ── -->
-    <header class="kds-header">
-      <div class="kds-header-left">
-        <div class="kds-logo">
-          <svg width="36" height="36" viewBox="0 0 64 64" aria-hidden="true">
-            <rect width="64" height="64" rx="14" fill="#1f2a20"/>
-            <path d="M16 26h32a7 7 0 0 1 0 14H16a7 7 0 0 1 0-14Z" fill="#f5f2ec"/>
-            <path d="M18 24c3-6 9-9 14-9s11 3 14 9H18Z" fill="#d09b21"/>
-            <path d="M18 40h28c-3 6-9 9-14 9s-11-3-14-9Z" fill="#c95830"/>
-          </svg>
-        </div>
-        <div>
-          <p class="kds-eyebrow">Kitchen Display System</p>
-          <h1 class="kds-title">Pedidos en Cocina</h1>
-        </div>
-      </div>
-
-      <div class="kds-header-right">
-        <!-- Stats por estado -->
-        <div class="kds-stats">
-          <div class="kds-stat kds-stat--nuevo">
-            <span class="kds-stat-count">{countNuevo}</span>
-            <span class="kds-stat-label">Nuevos</span>
-          </div>
-          <div class="kds-stat kds-stat--prep">
-            <span class="kds-stat-count">{countPrep}</span>
-            <span class="kds-stat-label">En prep.</span>
-          </div>
-          <div class="kds-stat kds-stat--listo">
-            <span class="kds-stat-count">{countListo}</span>
-            <span class="kds-stat-label">Listos</span>
-          </div>
-        </div>
-        <!-- Indicador de conexión -->
-        <span class="kds-connection" class:kds-connection--online={kitchenConnected}>
-          <span class="kds-dot"></span>
-          {kitchenConnected ? "Tiempo real activo" : "Reconectando…"}
+      <div class="hero-actions">
+        {#if currentUser}
+          <span class="status-pill">{currentUser.display_name} · {currentUser.role}</span>
+          <button class="nav-link nav-link--button" onclick={() => logout()}>Cerrar sesion</button>
+        {/if}
+        <span class:status-online={operationsConnected} class="status-pill">
+          {operationsConnected ? "Tiempo real activo" : "Reconectando"}
         </span>
-        <!-- Link a la pantalla de pedidos -->
-        <a class="kds-nav-link" href="/" aria-label="Ir a la pantalla de voz">
-          ← Ordenar
-        </a>
+        <a class="nav-link" href="/">Volver a la llamada</a>
       </div>
     </header>
 
-    <!-- ── Contenido ── -->
-    <main class="kds-main">
-      {#if orders.length === 0}
-        <div class="kds-empty">
-          <div class="kds-empty-icon">🍽️</div>
-          <p>No hay pedidos confirmados todavía.</p>
-          <p class="kds-empty-sub">Los pedidos aparecerán aquí en tiempo real cuando los clientes ordenen.</p>
-        </div>
-      {:else}
-        <div class="kds-grid">
-          {#each orders as order (order.id)}
-            <article class="kds-card kds-card--{order.status}" id="order-{shortId(order.id)}">
-              <!-- Cabecera de la tarjeta -->
-              <div class="kds-card-head">
-                <div class="kds-card-meta">
-                  <p class="kds-order-id">#{shortId(order.id)}</p>
-                  <p class="kds-order-time">🕐 {orderTime(order.created_at)}</p>
-                </div>
-                <span class="kds-badge kds-badge--{order.status}">
-                  {statusIcons[order.status]}
-                  {statusLabels[order.status]}
-                </span>
-              </div>
+    <section class="stats-grid">
+      <article class="stat-card">
+        <span>Nuevos</span>
+        <strong>{countNuevo}</strong>
+      </article>
+      <article class="stat-card">
+        <span>En preparacion</span>
+        <strong>{countPrep}</strong>
+      </article>
+      <article class="stat-card">
+        <span>Listos</span>
+        <strong>{countListo}</strong>
+      </article>
+      <article class="stat-card">
+        <span>En camino</span>
+        <strong>{countEnCamino}</strong>
+      </article>
+      <article class="stat-card">
+        <span>Caja pendiente</span>
+        <strong>{cashierQueue.length}</strong>
+      </article>
+    </section>
 
-              <!-- Ítems del pedido -->
-              <ul class="kds-items" aria-label="Productos del pedido">
+    <section class="ops-columns">
+      <article class="ops-column">
+        <h2>Pedidos activos</h2>
+        {#if orders.length === 0}
+          <p class="muted">Todavia no hay ordenes confirmadas.</p>
+        {:else}
+          {#each orders.filter((order) => order.status !== "entregado" && order.status !== "cancelado") as order}
+            <div class="order-card">
+              <div class="order-head">
+                <strong>#{shortId(order.id)}</strong>
+                <span>{statusLabels[order.status]}</span>
+              </div>
+              <p>{order.summary}</p>
+              <p class="muted">{order.delivery_type === "delivery" ? order.address : "Recoge en tienda"}</p>
+              <p class="muted"><a class="inline-link" href={`/track/${trackingCode(order)}`}>Seguimiento cliente</a></p>
+            </div>
+          {/each}
+        {/if}
+      </article>
+
+      {#if canSeeKitchen}
+        <article class="ops-column">
+          <h2>Modulo de cocina</h2>
+          {#each orders.filter((order) => order.status !== "entregado" && order.status !== "cancelado") as order}
+            <div class="order-card order-card--kitchen">
+              <div class="order-head">
+                <strong>#{shortId(order.id)}</strong>
+                <span>{formatTime(order.created_at)}</span>
+              </div>
+              <ul class="item-list">
                 {#each order.items as item}
-                  <li class="kds-item">
-                    <span class="kds-item-qty">{item.quantity}×</span>
-                    <span class="kds-item-name">{item.product_name}</span>
-                    <span class="kds-item-price">{money(item.quantity * item.unit_price_cents)}</span>
-                  </li>
+                  <li>{item.quantity} x {item.product_name}</li>
                 {/each}
               </ul>
-
-              <!-- Total -->
-              <div class="kds-total">
-                <span>Total</span>
-                <strong>{money(order.total_cents)}</strong>
+              <div class="pill-row">
+                {#each allowedStatusButtons(order) as status}
+                  <button onclick={() => setStatus(order, status)}>{statusLabels[status]}</button>
+                {/each}
               </div>
-
-              <!-- Pago -->
-              <div class="kds-payment-row">
-                {#if order.payment_method === "tarjeta"}
-                  <span class="kds-pay-badge kds-pay-badge--card">
-                    💳 Pagado con tarjeta
-                  </span>
-                {:else if order.payment_method === "efectivo"}
-                  <span class="kds-pay-badge kds-pay-badge--cash">
-                    💵 Cobrar {money(order.total_cents)}
-                  </span>
-                {:else}
-                  <span class="kds-pay-badge kds-pay-badge--pending">
-                    ⏳ Pago pendiente
-                  </span>
-                {/if}
-              </div>
-
-              <div class="kds-actions" role="group" aria-label="Cambiar estado del pedido">
-                <button
-                  id="btn-nuevo-{shortId(order.id)}"
-                  class="kds-action-btn kds-action-btn--nuevo"
-                  class:kds-action-btn--active={order.status === "nuevo"}
-                  onclick={() => setStatus(order, "nuevo")}
-                  aria-pressed={order.status === "nuevo"}
-                >
-                  🔴 Nuevo
-                </button>
-                <button
-                  id="btn-prep-{shortId(order.id)}"
-                  class="kds-action-btn kds-action-btn--prep"
-                  class:kds-action-btn--active={order.status === "en_preparacion"}
-                  onclick={() => setStatus(order, "en_preparacion")}
-                  aria-pressed={order.status === "en_preparacion"}
-                >
-                  🟡 En prep.
-                </button>
-                <button
-                  id="btn-listo-{shortId(order.id)}"
-                  class="kds-action-btn kds-action-btn--listo"
-                  class:kds-action-btn--active={order.status === "listo"}
-                  onclick={() => setStatus(order, "listo")}
-                  aria-pressed={order.status === "listo"}
-                >
-                  🟢 Listo
-                </button>
-              </div>
-            </article>
+              <p class="muted"><a class="inline-link" href={`/track/${trackingCode(order)}`}>Abrir seguimiento</a></p>
+            </div>
           {/each}
-        </div>
+        </article>
       {/if}
-    </main>
-  </div>
 
+      {#if canSeeCashier}
+        <article class="ops-column">
+          <h2>Modulo de caja</h2>
+          {#if cashierQueue.length === 0}
+            <p class="muted">No hay cobros pendientes en efectivo.</p>
+          {:else}
+            {#each cashierQueue as order}
+              <div class="order-card order-card--cashier">
+                <div class="order-head">
+                  <strong>#{shortId(order.id)}</strong>
+                  <span>{money(order.total_cents)}</span>
+                </div>
+                <p>Cobrar en efectivo al entregar o al retirar.</p>
+                <p class="muted">{order.summary}</p>
+                <div class="pill-row">
+                  <button onclick={() => setPaymentStatus(order, "paid")}>Marcar pagado</button>
+                </div>
+              </div>
+            {/each}
+          {/if}
+        </article>
+      {/if}
+    </section>
+  </main>
 {:else}
-  <!-- ═══════════════════════════════════════════════════════
-       VOICE ORDERING PAGE  /
-  ════════════════════════════════════════════════════════════ -->
   <main class="voice-page">
-    <header class="topbar">
+    <header class="hero">
       <div>
-        <p class="eyebrow">Voice Sandwich Demo</p>
-        <h1>Ordena hablando</h1>
+        <p class="eyebrow">Proyecto Final IA</p>
+        <h1>Call Center Inteligente para Pedidos</h1>
+        <p class="hero-copy">
+          Simulacion web de llamada con STT, structured output, RAG, tool calling y actualizacion operativa en tiempo real.
+        </p>
       </div>
-      <a class="kitchen-link" href="/kitchen" id="link-kitchen">Abrir /kitchen →</a>
+      <div class="hero-actions">
+        <a class="nav-link" href="/login?next=/operations">Ingreso interno</a>
+      </div>
     </header>
 
     <section class="voice-layout">
-      <article class="voice-panel">
+      <article class="panel panel--voice">
         <button
-          id="btn-mic"
+          class="mic-button"
           class:recording={listening}
           class:connecting={voiceStarting}
-          class="mic-button"
           disabled={voiceStarting}
           onclick={() => (listening ? stopVoice() : startVoice())}
-          aria-label={listening ? "Detener grabación" : voiceStarting ? "Conectando..." : "Comenzar a hablar"}
+          aria-label={listening ? "Detener llamada" : "Iniciar llamada"}
         >
           {listening ? "Detener" : voiceStarting ? "..." : "Hablar"}
         </button>
-        <p class="voice-state">
-          {voiceConnected ? "agente conectado" : "agente desconectado"} — {voiceStatus}
+
+        <p class="status-line">
+          {voiceConnected ? "backend conectado" : "backend desconectado"} - {voiceStatus}
         </p>
-        <div class="conversation">
+
+        <div class="conversation-card">
           <div>
-            <p class="label">Cliente</p>
-            <p>{transcript || "Aún no hay transcripción."}</p>
+            <span class="label">Cliente</span>
+            <p>{transcript || "Aun no hay transcripcion."}</p>
           </div>
           <div>
-            <p class="label">Agente</p>
+            <span class="label">Agente</span>
             <p>{assistantText || "Esperando respuesta del agente."}</p>
           </div>
-          {#if lastOrder}
-            <p class="notice">{lastOrder}</p>
-          {/if}
-          {#if lastPayment}
-            <p class="notice notice--payment">💳 {lastPayment}</p>
+          <div class="stt-monitor">
+            <span class="label">Historial de cliente</span>
+            {#if sttHistory.length === 0}
+              <p class="muted">No se ha recibido transcripción final.</p>
+            {:else}
+              <div class="stt-history">
+                {#each sttHistory as entry}
+                  <div class="stt-entry">
+                    <span class="stt-time">{entry.time}</span>
+                    <p>{entry.text}</p>
+                  </div>
+                {/each}
+              </div>
+            {/if}
+          </div>
+          {#if lastConfirmedOrder}
+            <div class="alert-success">
+              Orden #{shortId(lastConfirmedOrder.id)} confirmada por {money(lastConfirmedOrder.total_cents)}.
+              <a class="inline-link" href={`/track/${shortId(lastConfirmedOrder.id)}`}>Ver seguimiento</a>
+            </div>
           {/if}
         </div>
       </article>
 
-      <aside class="cart voice-cart">
-        <h2>Pedido detectado</h2>
-        {#if cartLines.length === 0}
-          <p class="muted">El pedido se llenará automáticamente cuando hables.</p>
-        {:else}
-          <ul class="items">
-            {#each cartLines as line}
-              <li>
-                <span>{line.quantity} x {line.name}</span>
-                <span>{money(line.line_total_cents)}</span>
-              </li>
-            {/each}
-          </ul>
-        {/if}
-        <div class="total">
-          <span>Total</span>
-          <strong>{money(cartTotal)}</strong>
+      <article class="panel">
+        <div class="panel-head">
+          <h2>Borrador estructurado</h2>
+          <span class:badge-ready={draft.ready_for_confirmation} class="badge">
+            {draft.ready_for_confirmation ? "Listo para confirmar" : "En construccion"}
+          </span>
         </div>
-      </aside>
+
+        <div class="draft-grid">
+          <div><span class="label">Cliente</span><p>{draft.customer_name || "No capturado"}</p></div>
+          <div><span class="label">Telefono</span><p>{draft.customer_phone || "No capturado"}</p></div>
+          <div><span class="label">Modalidad</span><p>{draft.delivery_type || "Pendiente"}</p></div>
+          <div><span class="label">Pago</span><p>{draft.payment_method || "Pendiente"}</p></div>
+          <div class="draft-full"><span class="label">Direccion</span><p>{draft.address || "Pendiente"}</p></div>
+        </div>
+
+        <ul class="item-list">
+          {#if draft.items.length === 0}
+            <li class="muted">Todavia no hay productos reconocidos.</li>
+          {:else}
+            {#each draft.items as item}
+              <li>{item.quantity} x {item.name} - {money(item.quantity * item.unit_price_cents)}</li>
+            {/each}
+          {/if}
+        </ul>
+
+        <div class="summary-row">
+          <strong>Total detectado</strong>
+          <strong>{money(draftTotal)}</strong>
+        </div>
+
+        <div>
+          <span class="label">Campos pendientes</span>
+          <p>{draft.missing_fields.length ? draft.missing_fields.join(", ") : "Ninguno"}</p>
+        </div>
+      </article>
     </section>
 
-    <section class="menu-strip">
-      {#each menu as item}
-        <article class="menu-chip">
-          <strong>{item.name}</strong>
-          <span>{money(item.price_cents)} - stock {item.stock}</span>
-        </article>
-      {/each}
+    <section class="detail-grid">
+      <article class="panel">
+        <h2>Contexto recuperado por RAG</h2>
+        {#if retrievalHits.length === 0}
+          <p class="muted">Los resultados semanticos apareceran aqui cuando el sistema consulte menu, pagos u horarios.</p>
+        {:else}
+          {#each retrievalHits as hit}
+            <div class="retrieval-hit">
+              <strong>{hit.title}</strong>
+              <span>{hit.source} - score {hit.score.toFixed(2)}</span>
+              <p>{hit.content}</p>
+            </div>
+          {/each}
+        {/if}
+      </article>
+
+      <article class="panel">
+        <h2>Menu indexado</h2>
+        <div class="menu-grid">
+          {#each menu as item}
+            <div class="menu-card">
+              <strong>{item.name}</strong>
+              <span>{money(item.price_cents)}</span>
+              <p>{item.description}</p>
+              <small>Stock {item.stock} - {item.category}</small>
+            </div>
+          {/each}
+        </div>
+      </article>
     </section>
   </main>
 {/if}

@@ -1,64 +1,48 @@
-.PHONY: bootstrap install-web install-ts install-py build-web dev-web start-ts start-py dev-ts dev-py clean
+.PHONY: bootstrap install-web install-py build-web dev-web dev-py start-py clean check-web check-py check
 
-##= Installation
+## Installation
 
-bootstrap: install-web install-ts install-py
+bootstrap: install-web install-py
 
 install-web:
 	cd components/web && pnpm install
 
-install-ts:
-	cd components/typescript && pnpm install
-
 install-py:
 	cd components/python && uv sync --dev
 
-##= Web Build
+## Web build
 
 build-web:
 	cd components/web && pnpm build
 
-# Watch mode for web - rebuilds on changes
 dev-web:
 	cd components/web && pnpm build --watch
 
-##= Development (web watch + server)
+## Development
 
-# TypeScript server with web watch
-dev-ts:
-	@echo "Starting web build watcher and TypeScript server..."
-	@trap 'kill 0' EXIT; \
-		(cd components/web && pnpm build --watch) & \
-		sleep 2 && cd components/typescript && pnpm run server
-
-# Python server with web watch
 dev-py:
 	@echo "Starting web build watcher and Python server..."
 	@trap 'kill 0' EXIT; \
 		(cd components/web && pnpm build --watch) & \
 		sleep 2 && cd components/python && uv run src/main.py
 
-##= Server Only (no web watch - use pre-built assets)
-
-start-ts: build-web
-	cd components/typescript && pnpm run server
-
 start-py: build-web
 	cd components/python && uv run src/main.py
 
-##= Utilities
+## Utilities
 
 clean:
 	rm -rf components/web/dist
 	rm -rf components/web/node_modules
-	rm -rf components/typescript/node_modules
 	rm -rf components/python/.venv
+	rm -rf components/python/.uv-cache
+	rm -rf components/python/.ruff_cache
+	rm -rf components/python/.pytest_cache
 
-# Type checking
 check-web:
 	cd components/web && pnpm check
 
-check-ts:
-	cd components/typescript && pnpm run typecheck
+check-py:
+	cd components/python && uv run pytest
 
-check: check-web check-ts
+check: check-web check-py
