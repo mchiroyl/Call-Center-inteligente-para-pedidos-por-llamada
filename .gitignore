@@ -39,7 +39,7 @@ venv/
 htmlcov/
 
 # Academic/private deliverables not required to run the system
-docs/
+docs/*.docx
 deliverables/
 
 # Editor and OS files
