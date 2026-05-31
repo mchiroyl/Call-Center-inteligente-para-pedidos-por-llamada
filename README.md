@@ -95,6 +95,51 @@ Al iniciar el backend, el sistema:
 
 Estos archivos son estado local de ejecucion y estan ignorados por Git.
 
+## Diagrama de proceso
+
+```mermaid
+flowchart TD
+    A["Cliente"] --> B{"Canal de entrada"}
+
+    B -->|"Llamada simulada web"| C["Frontend Svelte"]
+    C --> D["WebSocket /ws"]
+
+    B -->|"Llamada real Twilio"| E["POST /twilio/voice"]
+    E --> F["Respuesta TwiML"]
+    F --> G["WebSocket /twilio/media-stream"]
+
+    D --> H["Captura de audio"]
+    G --> H
+    H --> I["STT AssemblyAI"]
+    I --> J["Texto final del cliente"]
+
+    J --> K["LangGraph workflow con estado"]
+    K --> L["Cargar sesion y borrador"]
+    L --> M["RAG y embeddings sobre menu y politicas"]
+    M --> N["Structured output del pedido"]
+    N --> O{"Pedido completo y claro?"}
+
+    O -->|"No"| P["Respuesta de aclaracion"]
+    P --> Q["TTS Cartesia u OpenAI"]
+    Q --> R["Audio de respuesta"]
+    R --> H
+
+    O -->|"Si"| S["Confirmacion del cliente"]
+    S --> T{"Cliente confirma?"}
+    T -->|"No"| P
+    T -->|"Si"| U["Guardar orden en SQLite"]
+
+    U --> V["Eventos y checkpoints LangGraph"]
+    U --> W["Dashboard operaciones"]
+    W --> X["Cocina, caja y operaciones"]
+    X --> Y["Cambios de estado en tiempo real"]
+    U --> Z["Seguimiento publico /track/CODIGO"]
+
+    U --> AA["Respuesta final hablada"]
+    AA --> AB["TTS"]
+    AB --> AC["Cierre controlado de llamada"]
+```
+
 ## Rutas principales
 
 - `GET /` interfaz de llamada simulada.

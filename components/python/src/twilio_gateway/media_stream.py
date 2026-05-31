@@ -186,18 +186,19 @@ async def handle_twilio_media_stream(websocket: WebSocket) -> None:
                     continue
                 if event.type == "call_control" and event.action == "hangup":
                     delay_s = _farewell_hangup_delay_s(last_agent_text)
+                    hangup_reason = event.reason
                     logger.info(
                         "Twilio call control received for call %s: action=%s reason=%s delay=%.1fs",
                         call_sid or "unknown",
                         event.action,
-                        event.reason,
+                        hangup_reason,
                         delay_s,
                     )
 
                     async def hangup_after_delay() -> None:
                         await asyncio.sleep(delay_s)
                         try:
-                            await _hangup_twilio_call(call_sid, event.reason)
+                            await _hangup_twilio_call(call_sid, hangup_reason)
                         except Exception:
                             logger.exception(
                                 "Twilio REST hangup failed for call %s; closing websocket instead",
